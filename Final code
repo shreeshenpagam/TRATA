@@ -1,0 +1,188 @@
+#include <TinyGPS++.h>
+
+TinyGPSPlus gps;
+
+// -------- PINS --------
+#define FSR_PIN A0
+#define PIEZO_PIN A1
+#define BUTTON_PIN 7
+#define BUZZER_PIN A8
+
+// -------- THRESHOLDS --------
+#define FSR_THRESHOLD 50
+#define PIEZO_THRESHOLD 850
+
+// -------- GSM SETTINGS --------
+#define PHONE_NUMBER "+9183080 32572"   
+
+// -------- VARIABLES --------
+bool alertActive = false;
+bool buttonHandled = false;
+
+unsigned long lastLogTime = 0;
+bool gsmAvailable = false;
+
+// Store up to 20 missed locations
+String storedLocations[20];
+int storeIndex = 0;
+
+// -------- SETUP --------
+void setup() {
+  Serial.begin(9600);
+  Serial1.begin(9600); // GPS
+  Serial2.begin(9600); // GSM
+
+  pinMode(BUTTON_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  Serial.println("SYSTEM STARTED");
+
+  delay(3000);
+
+  initGSM();
+}
+
+// -------- LOOP --------
+void loop() {
+
+  // -------- GPS READ --------
+  while (Serial1.available()) {
+    gps.encode(Serial1.read());
+  }
+
+  // -------- SENSOR READ --------
+  int fsrValue = analogRead(FSR_PIN);
+  int piezoValue = analogRead(PIEZO_PIN);
+  int buttonState = digitalRead(BUTTON_PIN);
+
+  // -------- CHECK GSM SIGNAL --------
+  gsmAvailable = checkGSM();
+
+  // -------- LOG GPS IF NO SIGNAL --------
+  if (!gsmAvailable && gps.location.isValid()) {
+    if (millis() - lastLogTime > 5000) { // log every 5 sec
+      storeLocation(gps.location.lat(), gps.location.lng());
+      lastLogTime = millis();
+    }
+  }
+
+  // -------- ALERT TRIGGERS --------
+  if (!alertActive) {
+
+    if (fsrValue > FSR_THRESHOLD ||
+        piezoValue > PIEZO_THRESHOLD ||
+        (buttonState == HIGH && !buttonHandled)) {
+
+      triggerAlert();
+
+      if (buttonState == HIGH) buttonHandled = true;
+
+      if (gps.location.isValid()) {
+        if (gsmAvailable) {
+          sendSMS(gps.location.lat(), gps.location.lng());
+        } else {
+          storeLocation(gps.location.lat(), gps.location.lng());
+        }
+      }
+    }
+  }
+
+  if (buttonState == LOW) buttonHandled = false;
+
+  // -------- BURST SEND WHEN SIGNAL RETURNS --------
+  if (gsmAvailable && storeIndex > 0) {
+    Serial.println("Network back → Sending stored data...");
+    for (int i = 0; i < storeIndex; i++) {
+      sendStoredSMS(storedLocations[i]);
+      delay(3000);
+    }
+    storeIndex = 0; // clear memory
+  }
+
+  delay(200);
+}
+
+// -------- GSM INIT --------
+void initGSM() {
+  Serial2.println("AT");
+  delay(1000);
+  Serial2.println("AT+CMGF=1");
+  delay(1000);
+}
+
+// -------- CHECK GSM --------
+bool checkGSM() {
+  Serial2.println("AT+CSQ"); // signal quality
+  delay(500);
+
+  if (Serial2.available()) {
+    String res = Serial2.readString();
+    if (res.indexOf("+CSQ:") != -1) {
+      int signal = res.substring(res.indexOf(":") + 1).toInt();
+      if (signal > 5) return true;
+    }
+  }
+  return false;
+}
+
+// -------- STORE LOCATION --------
+void storeLocation(float lat, float lon) {
+  if (storeIndex < 20) {
+    storedLocations[storeIndex] =
+      "https://maps.google.com/?q=" +
+      String(lat, 6) + "," + String(lon, 6);
+
+    Serial.println("Stored location");
+    storeIndex++;
+  }
+}
+
+// -------- SEND SMS --------
+void sendSMS(float lat, float lon) {
+  Serial.println("Sending SMS...");
+
+  Serial2.println("AT+CMGF=1");
+  delay(1000);
+
+  Serial2.print("AT+CMGS=\"");
+  Serial2.print(PHONE_NUMBER);
+  Serial2.println("\"");
+  delay(1000);
+
+  Serial2.print("EMERGENCY ALERT!\nLocation:\n");
+  Serial2.print("https://maps.google.com/?q=");
+  Serial2.print(lat, 6);
+  Serial2.print(",");
+  Serial2.print(lon, 6);
+
+  Serial2.write(26); // CTRL+Z
+  delay(5000);
+}
+
+// -------- SEND STORED SMS --------
+void sendStoredSMS(String location) {
+  Serial2.println("AT+CMGF=1");
+  delay(1000);
+
+  Serial2.print("AT+CMGS=\"");
+  Serial2.print(PHONE_NUMBER);
+  Serial2.println("\"");
+  delay(1000);
+
+  Serial2.print("Stored Alert Location:\n");
+  Serial2.print(location);
+
+  Serial2.write(26);
+  delay(5000);
+}
+
+// -------- ALERT --------
+void triggerAlert() {
+  alertActive = true;
+
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(3000);   // 3 sec buzzer
+  digitalWrite(BUZZER_PIN, LOW);
+
+  alertActive = false;
+}
